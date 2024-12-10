@@ -120,26 +120,29 @@ while getopts "hd:uicrft:lp:" OPTION; do
         h ) help ;;
         d ) DEPLOY_DIR="$OPTARG" ;;
         p ) PHP_VERSION="$OPTARG" ;;
+        u ) UPDATE=true ;;
+        i ) INSTALL=true ;;
+        c ) CACHE_CONFIG=true ;;
+        r ) RESET=true ;;
+        f ) REFRESH=true ;;
+        t ) TAIL_LINES="$OPTARG" ;;
+        l ) TAIL_FOLLOW=true ;;
     esac
 done
 
 check_deploy_dir
-
 pushd $DEPLOY_DIR
 
 switch_php_version
 
-while getopts "hd:uicrft:lp:" OPTION; do
-    case $OPTION in
-    u ) update ;;
-    i ) install ;;
-    c ) cache_config ;;
-    r ) reset ;;
-    f ) refresh ;;
-    t ) tail_line $OPTARG ;;
-    l ) tail_follow ;;
-    esac
-done
+# Execute tasks based on options
+[[ $UPDATE == true ]] && update
+[[ $INSTALL == true ]] && install
+[[ $CACHE_CONFIG == true ]] && cache_config
+[[ $RESET == true ]] && reset
+[[ $REFRESH == true ]] && refresh
+[[ -n "$TAIL_LINES" ]] && tail_line $TAIL_LINES
+[[ $TAIL_FOLLOW == true ]] && tail_follow
 
 popd
 revert_php_version
