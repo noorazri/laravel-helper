@@ -23,6 +23,8 @@ help() {
     echo -e "$(e "f - Refresh laravel instance" "YELLOW")"
     echo -e "$(e "t - Output Laravel log file with specified line number (eg: -t 100 to output last 100 line)" "YELLOW")"
     echo -e "$(e "l - Output Laravel log file and append output as log file grow" "YELLOW")"
+    echo -e "$(e "s - Restart a specific supervisor program (eg: -s laravel-worker)" "YELLOW")"
+    echo -e "$(e "z - Restart Horizon (terminates so supervisor respawns it)" "YELLOW")"
 
     exit 0
 }
@@ -68,6 +70,16 @@ cache_config() {
     php artisan config:cache
 }
 
+restart_supervisor() {
+    echo -e "$(e "Restarting supervisor program: $1\n" "YELLOW")"
+    sudo supervisorctl restart "$1"
+}
+
+restart_horizon() {
+    echo -e "$(e "Restarting Horizon\n" "YELLOW")"
+    php artisan horizon:terminate || true
+}
+
 tail_line() {
     echo -e "$(e "Laravel log\n" "YELLOW")" 
     FILE="storage/logs/laravel-$(date +%Y-%m-%d).log"
@@ -94,7 +106,7 @@ if [[ $# == 0 ]]; then
     help
 fi
 
-while getopts "hd:uicrft:l" OPTION; do
+while getopts "hd:uicrft:ls:z" OPTION; do
     case $OPTION in
         h ) help ;;
         d ) DEPLOY_DIR="$OPTARG" ;;
@@ -107,7 +119,7 @@ check_deploy_dir
 
 pushd $DEPLOY_DIR
 
-while getopts "hd:uicrft:l" OPTION; do
+while getopts "hd:uicrft:ls:z" OPTION; do
     case $OPTION in
     u ) update ;;
     i ) install ;;
@@ -116,6 +128,8 @@ while getopts "hd:uicrft:l" OPTION; do
     f ) refresh ;;
     t ) tail_line $OPTARG ;;
     l ) tail_follow ;;
+    s ) restart_supervisor $OPTARG ;;
+    z ) restart_horizon ;;
     esac
 done
 
