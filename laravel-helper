@@ -113,8 +113,10 @@ cache_config() {
 }
 
 restart_supervisor() {
-    echo -e "$(e "Restarting supervisor program: $1\n" "YELLOW")"
-    sudo supervisorctl restart "$1"
+    local program="$1"
+    [[ "$program" != *:* ]] && program="$program:*"
+    echo -e "$(e "Restarting supervisor program: $program\n" "YELLOW")"
+    sudo supervisorctl restart "$program"
 }
 
 restart_horizon() {
@@ -163,8 +165,8 @@ while getopts "hd:uicrft:ls:zp:" OPTION; do
         f ) ACTIONS+=("refresh") ;;
         t ) TAIL_LINES="$OPTARG"; ACTIONS+=("tail_line $OPTARG") ;;
         l ) ACTIONS+=("tail_follow") ;;
-        s ) restart_supervisor $OPTARG ;;
-        z ) restart_horizon ;;
+        s ) ACTIONS+=("restart_supervisor $OPTARG") ;;
+        z ) ACTIONS+=("restart_horizon") ;;
     esac
 done
 
