@@ -1,4 +1,5 @@
-#! /bin/bash
+#!/bin/bash
+set -e 
 
 e() {
     RED='\033[0;31m'
@@ -8,12 +9,11 @@ e() {
     NC='\033[0m'
 
     TXT_COLOR="${!2}"
-    echo "${TXT_COLOR}$1${NC}"
+    echo -e "${TXT_COLOR}$1${NC}"
 }
 
-
 help() {
-    echo -e "$(e "### Help ###\n" "YELLOW")" 
+    echo -e "$(e "### Help ###\n" "YELLOW")"
 
     echo -e "$(e "d - Target directory (eg: -d /opt/my-laravel)" "YELLOW")"
     echo -e "$(e "u - Update code using git pull (defaults to master branch)" "YELLOW")"
@@ -25,6 +25,7 @@ help() {
     echo -e "$(e "l - Output Laravel log file and append output as log file grow" "YELLOW")"
     echo -e "$(e "s - Restart a specific supervisor program (eg: -s laravel-worker)" "YELLOW")"
     echo -e "$(e "z - Restart Horizon (terminates so supervisor respawns it)" "YELLOW")"
+    echo -e "$(e "p - Specify PHP version to use temporarily (eg: -p 8.1)" "YELLOW")"
 
     exit 0
 }
@@ -39,35 +40,76 @@ check_deploy_dir() {
             echo -e "\nExiting..."
             exit 1
         fi
-    else
-        DEPLOY_DIR="${DEPLOY_DIR}"
+    fi
+}
+
+switch_php_version() {
+    if [[ -n "$PHP_VERSION" ]]; then
+        echo -e "$(e "Switching to PHP $PHP_VERSION" "YELLOW")"
+        PHP_PATH="/usr/bin/php$PHP_VERSION"
+        if [[ ! -f "$PHP_PATH" ]]; then
+            echo -e "$(e "Error: PHP version $PHP_VERSION is not installed on this system." "RED")"
+            exit 1
+        fi
+
+        ORIGINAL_PHP=$(update-alternatives --query php | grep Value: | awk '{print $2}' | head -n 1)
+        sudo update-alternatives --set php /usr/bin/php$PHP_VERSION
+        PHP_CHANGED=true
+    fi
+}
+
+revert_php_version() {
+    if [[ "$PHP_CHANGED" == true ]]; then
+        echo -e "$(e "Reverting to original PHP version" "YELLOW")"
+        sudo update-alternatives --set php $ORIGINAL_PHP
     fi
 }
 
 update() {
-    echo -e "$(e "Updating code in $DEPLOY_DIR\n" "YELLOW")" 
+    echo -e "$(e "Updating code in $DEPLOY_DIR\n" "YELLOW")"
     git checkout -- .
     git pull
+    sudo chown -R www-data:www-data app bootstrap config database public resources routes tests vendor artisan
 }
 
 install() {
-    echo -e "$(e "Installing dependencies\n" "YELLOW")" 
+    echo -e "$(e "Installing dependencies\n" "YELLOW")"
     composer install
     php artisan migrate
 }
 
 reset() {
-    echo -e "$(e "Reset folder permissions\n" "YELLOW")" 
-    sudo chgrp -R www-data . && sudo chmod -R 775 storage && sudo chmod -R 775 bootstrap/cache
+    echo -e "$(e "Reset folder permissions\n" "YELLOW")"
+    sudo chgrp -R www-data storage/framework storage/logs bootstrap/cache && sudo chmod -R 775 storage/framework storage/logs bootstrap/cache
+    sudo chown -R www-data:www-data app bootstrap config database public resources routes tests vendor artisan
 }
 
 refresh() {
     echo -e "$(e "Refresh laravel instance\n" "YELLOW")"
     composer dump-autoload && php artisan cache:clear && php artisan config:clear && php artisan view:clear && php artisan queue:restart
+
+    PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+    FPM_SERVICE="php${PHP_VER}-fpm"
+    if systemctl is-active --quiet "$FPM_SERVICE"; then
+        echo -e "$(e "Restarting $FPM_SERVICE\n" "YELLOW")"
+        sudo systemctl reload "$FPM_SERVICE"
+    fi
 }
 
 cache_config() {
     php artisan config:cache
+    php artisan route:cache
+    php artisan view:cache
+    php artisan event:cache
+    php artisan filament:optimize || true
+    php artisan horizon:terminate || true
+
+    PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
+    FPM_SERVICE="php${PHP_VER}-fpm"
+    if systemctl is-active --quiet "$FPM_SERVICE"; then
+        echo -e "$(e "Restarting $FPM_SERVICE\n" "YELLOW")"
+        sudo systemctl restart "$FPM_SERVICE"
+    fi
 }
 
 restart_supervisor() {
@@ -81,7 +123,7 @@ restart_horizon() {
 }
 
 tail_line() {
-    echo -e "$(e "Laravel log\n" "YELLOW")" 
+    echo -e "$(e "Laravel log\n" "YELLOW")"
     FILE="storage/logs/laravel-$(date +%Y-%m-%d).log"
     FILE2="storage/logs/laravel.log"
     if [ -f "$FILE" ]; then
@@ -92,7 +134,7 @@ tail_line() {
 }
 
 tail_follow() {
-    echo -e "$(e "Laravel log\n" "YELLOW")" 
+    echo -e "$(e "Laravel log\n" "YELLOW")"
     FILE="storage/logs/laravel-$(date +%Y-%m-%d).log"
     FILE2="storage/logs/laravel.log"
     if [ -f "$FILE" ]; then
@@ -106,31 +148,35 @@ if [[ $# == 0 ]]; then
     help
 fi
 
-while getopts "hd:uicrft:ls:z" OPTION; do
+
+PHP_CHANGED=false
+ACTIONS=()
+while getopts "hd:uicrft:ls:zp:" OPTION; do
     case $OPTION in
         h ) help ;;
         d ) DEPLOY_DIR="$OPTARG" ;;
+        p ) PHP_VERSION="$OPTARG" ;;
+        u ) ACTIONS+=("update") ;;
+        i ) ACTIONS+=("install") ;;
+        c ) ACTIONS+=("cache_config") ;;
+        r ) ACTIONS+=("reset") ;;
+        f ) ACTIONS+=("refresh") ;;
+        t ) TAIL_LINES="$OPTARG"; ACTIONS+=("tail_line $OPTARG") ;;
+        l ) ACTIONS+=("tail_follow") ;;
+        s ) restart_supervisor $OPTARG ;;
+        z ) restart_horizon ;;
     esac
 done
 
-OPTIND=1
-
 check_deploy_dir
-
 pushd $DEPLOY_DIR
 
-while getopts "hd:uicrft:ls:z" OPTION; do
-    case $OPTION in
-    u ) update ;;
-    i ) install ;;
-    c ) cache_config ;;
-    r ) reset ;;
-    f ) refresh ;;
-    t ) tail_line $OPTARG ;;
-    l ) tail_follow ;;
-    s ) restart_supervisor $OPTARG ;;
-    z ) restart_horizon ;;
-    esac
+switch_php_version
+
+# Execute tasks in the order flags were provided
+for ACTION in "${ACTIONS[@]}"; do
+    $ACTION
 done
 
 popd
+revert_php_version
