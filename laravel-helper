@@ -20,6 +20,7 @@ help() {
     echo -e "$(e "i - Install dependencies using composer" "YELLOW")"
     echo -e "$(e "c - Cache config files" "YELLOW")"
     echo -e "$(e "r - Fix folder permission / ownership" "YELLOW")"
+    echo -e "$(e "o - Set ownership as owner:group for app files, like chown (eg: -o deploy:uapskm). Defaults to www-data:www-data. When set and run as root, code/build steps run as this owner" "YELLOW")"
     echo -e "$(e "f - Refresh laravel instance" "YELLOW")"
     echo -e "$(e "t - Output Laravel log file with specified line number (eg: -t 100 to output last 100 line)" "YELLOW")"
     echo -e "$(e "l - Output Laravel log file and append output as log file grow" "YELLOW")"
@@ -65,28 +66,61 @@ revert_php_version() {
     fi
 }
 
+# Run a code/build command as the target owner (from -o) when the script is
+# invoked as root, so git/composer/artisan keep files owned by that user and use
+# its credentials. When already running as the owner, runs the command directly.
+# Privileged service actions (systemctl/supervisorctl/update-alternatives) are
+# left as plain sudo so they still run as root.
+as_owner() {
+    if [[ ${#AS_OWNER[@]} -gt 0 ]]; then
+        "${AS_OWNER[@]}" "$@"
+    else
+        "$@"
+    fi
+}
+
+# Apply $OWNERSHIP (owner:group) to app files, skipping paths that don't exist
+# so a missing dir doesn't abort the run under `set -e`. Runs without sudo:
+# the deploying user owns the tree and only needs membership of the target group.
+fix_ownership() {
+    local targets=(app bootstrap config database lang public resources routes tests vendor artisan)
+    local existing=()
+    for t in "${targets[@]}"; do
+        [[ -e "$t" ]] && existing+=("$t")
+    done
+    [[ ${#existing[@]} -gt 0 ]] && chown -R "$OWNERSHIP" "${existing[@]}"
+}
+
 update() {
     echo -e "$(e "Updating code in $DEPLOY_DIR\n" "YELLOW")"
-    git checkout -- .
-    git pull
-    sudo chown -R www-data:www-data app bootstrap config database public resources routes tests vendor artisan
+    as_owner git checkout -- .
+    as_owner git pull
+    fix_ownership
 }
 
 install() {
     echo -e "$(e "Installing dependencies\n" "YELLOW")"
-    composer install
-    php artisan migrate
+    as_owner composer install
+    as_owner php artisan migrate
 }
 
 reset() {
     echo -e "$(e "Reset folder permissions\n" "YELLOW")"
-    sudo chgrp -R www-data storage/framework storage/logs bootstrap/cache && sudo chmod -R 775 storage/framework storage/logs bootstrap/cache
-    sudo chown -R www-data:www-data app bootstrap config database public resources routes tests vendor artisan
+    # Legacy www-data layout keeps 775; an explicit owner gets the hardened 2770
+    # (group-writable, no access for others, setgid so new files inherit the group).
+    local mode=2770
+    [[ "${OWNERSHIP%%:*}" == "www-data" ]] && mode=775
+    chgrp -R "${OWNERSHIP##*:}" storage/framework storage/logs bootstrap/cache && chmod -R "$mode" storage/framework storage/logs bootstrap/cache
+    fix_ownership
 }
 
 refresh() {
     echo -e "$(e "Refresh laravel instance\n" "YELLOW")"
-    composer dump-autoload && php artisan cache:clear && php artisan config:clear && php artisan view:clear && php artisan queue:restart
+    as_owner composer dump-autoload
+    as_owner php artisan cache:clear
+    as_owner php artisan config:clear
+    as_owner php artisan view:clear
+    as_owner php artisan queue:restart
 
     PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
     FPM_SERVICE="php${PHP_VER}-fpm"
@@ -97,12 +131,12 @@ refresh() {
 }
 
 cache_config() {
-    php artisan config:cache
-    php artisan route:cache
-    php artisan view:cache
-    php artisan event:cache
-    php artisan filament:optimize || true
-    php artisan horizon:terminate || true
+    as_owner php artisan config:cache
+    as_owner php artisan route:cache
+    as_owner php artisan view:cache
+    as_owner php artisan event:cache
+    as_owner php artisan filament:optimize || true
+    as_owner php artisan horizon:terminate || true
 
     PHP_VER=$(php -r 'echo PHP_MAJOR_VERSION.".".PHP_MINOR_VERSION;')
     FPM_SERVICE="php${PHP_VER}-fpm"
@@ -121,7 +155,7 @@ restart_supervisor() {
 
 restart_horizon() {
     echo -e "$(e "Restarting Horizon\n" "YELLOW")"
-    php artisan horizon:terminate || true
+    as_owner php artisan horizon:terminate || true
 }
 
 tail_line() {
@@ -153,11 +187,18 @@ fi
 
 PHP_CHANGED=false
 ACTIONS=()
-while getopts "hd:uicrft:ls:zp:" OPTION; do
+# Ownership defaults to www-data:www-data for backwards compatibility. Setting it
+# explicitly (via -o or the OWNERSHIP env var) is what opts in to running the
+# code/build steps as that user when invoked as root.
+OWNERSHIP_EXPLICIT=false
+[[ -n "${OWNERSHIP:-}" ]] && OWNERSHIP_EXPLICIT=true
+OWNERSHIP="${OWNERSHIP:-www-data:www-data}"
+while getopts "hd:uicrft:ls:zp:o:" OPTION; do
     case $OPTION in
         h ) help ;;
         d ) DEPLOY_DIR="$OPTARG" ;;
         p ) PHP_VERSION="$OPTARG" ;;
+        o ) OWNERSHIP="$OPTARG"; OWNERSHIP_EXPLICIT=true ;;
         u ) ACTIONS+=("update") ;;
         i ) ACTIONS+=("install") ;;
         c ) ACTIONS+=("cache_config") ;;
@@ -169,6 +210,16 @@ while getopts "hd:uicrft:ls:zp:" OPTION; do
         z ) ACTIONS+=("restart_horizon") ;;
     esac
 done
+
+# When ownership was set explicitly and we are root for a different target user,
+# drop code/build steps to that user via sudo (so files stay owned by them); leave
+# service steps running as root. Without -o this stays empty -> legacy behavior.
+OWNER="${OWNERSHIP%%:*}"
+AS_OWNER=()
+if [[ "$OWNERSHIP_EXPLICIT" == true && "$(id -u)" -eq 0 && "$(id -un)" != "$OWNER" ]]; then
+    echo -e "$(e "Running as root; code steps will run as $OWNER" "YELLOW")"
+    AS_OWNER=(sudo -u "$OWNER" -H --)
+fi
 
 check_deploy_dir
 pushd $DEPLOY_DIR
